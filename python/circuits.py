@@ -1,5 +1,5 @@
 import numpy as np
-from qiskit.opflow import PauliOp, SummedOp
+from qiskit.opflow import SummedOp
 
 from qiskit import QuantumCircuit, execute
 from qiskit import Aer
@@ -8,6 +8,28 @@ simulator = Aer.get_backend('qasm_simulator')
 def generateBasis(H: SummedOp) -> str:
     n = H.num_qubits
     qubits_shift = list(np.random.choice(range(n), size=n, replace=False))
+    bases_shift = []
+    for j in range(n):
+        basisSingle = _generateBasisSingle(j, qubits_shift, bases_shift, H)
+        bases_shift.append(basisSingle)
+    B = '' # measurement basis
+    for i in range(n):
+        j = qubits_shift.index(i)
+        B = B + bases_shift[j]
+    return B
+
+def generateBasis2(H: SummedOp) -> str:
+    n = H.num_qubits
+    # Choose fixed best qubit ordering instead of randomizing:
+    qubit_weights = [[i,0] for i in range(n)]
+    for x in H:
+        coeff, pauli = x.coeff, str(x.primitive)
+        for i in range(n):
+            if pauli[i] != 'I':
+                qubit_weights[i][1] += abs(coeff)
+    qubit_weights.sort(key=lambda x: x[1])
+    qubits_shift = [w[0] for w in qubit_weights]
+    # print('order =',qubits_shift)
     bases_shift = []
     for j in range(n):
         basisSingle = _generateBasisSingle(j, qubits_shift, bases_shift, H)
@@ -49,6 +71,73 @@ def _isCompatible(pauli, j, qubits_shift, bases_shift):
         if not pauli[i] in ('I', bases_shift[k]):
             return False
     return True
+
+def precomputePauliFrequencies(H: SummedOp, M: int) -> dict:
+    out = {}
+    for x in H:
+        coeff, P = x.coeff, str(x.primitive)
+        out[P] = 0
+    for i in range(10*M):
+        B = generateBasis(H)
+        for P in out.keys():
+            if all([P[j]==B[j] or P[j]=='I' for j in range(len(P))]):
+                out[P] += 1
+    for P in out.keys():
+        out[P] = out[P]/10
+    return out
+
+def updateHamiltonian(H: SummedOp, MPs: dict, B: str) -> SummedOp:
+    MPs_new = {}
+    scaleFactors = []
+    
+    for x in H:
+        coeff, P = x.coeff, str(x.primitive)
+        if all([P[j]==B[j] or P[j]=='I' for j in range(len(P))]):
+            MPs_new[P] = MPs[P] - 1
+            if MPs[P] > 1:
+                scaleFactors.append(np.sqrt(1-1/MPs[P]))
+                # scaleFactors.append(1)
+            else:
+                scaleFactors.append(0)
+        else:
+            MPs_new[P] = MPs[P]
+            # if MPs[P] > 1:
+            #     scaleFactors.append(np.sqrt(1+1/MPs[P]))
+            # else:
+            #     scaleFactors.append(1)
+            scaleFactors.append(1)
+            
+    return SummedOp([H[i].mul(scaleFactors[i]) for i in range(len(H))]), MPs_new
+
+def updateHamiltonian2(H: SummedOp, counts: dict, B: str) -> SummedOp:
+    scaleFactors = []
+    
+    for x in H:
+        coeff, P = x.coeff, str(x.primitive)
+        if all([P[j]==B[j] or P[j]=='I' for j in range(len(P))]):
+            if counts[P] > 0:
+                scaleFactors.append(np.sqrt(counts[P]/(counts[P]+2)))
+            else:
+                scaleFactors.append(1/np.sqrt(2))
+        else:
+            scaleFactors.append(1)
+            
+    return SummedOp([H[i].mul(scaleFactors[i]) for i in range(len(H))])
+
+# Includes state and shot info in variance estimates.
+def rescaledHamiltonian(H: SummedOp, pauliEstimates: dict) -> SummedOp:
+    scaleFactors = []
+
+    for x in H:
+        coeff, P = x.coeff, str(x.primitive)
+        samples = pauliEstimates[P]['number']
+        estimate = pauliEstimates[P]['running'][-1]
+        if samples > 10:
+            scaleFactors.append(np.sqrt((1-estimate**2)/(samples*(samples+1))))
+        else:
+            scaleFactors.append(1)
+            
+    return SummedOp([H[i].mul(scaleFactors[i]) for i in range(len(H))])
 
 def runAndMeasure(state, basis):
     n = len(basis)
